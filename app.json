@@ -1,0 +1,49 @@
+{
+  "expo": {
+    "name": "RunFit",
+    "slug": "runfit",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "scheme": "runfit",
+    "splash": {
+      "image": "./assets/images/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.runfit.app"
+    },
+    "android": {
+      "package": "com.runfit.app",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "ACTIVITY_RECOGNITION"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "允许 RunFit 使用您的位置来记录跑步路线",
+          "locationWhenInUsePermission": "允许 RunFit 获取您的位置来显示地图和记录路线"
+        }
+      ],
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "允许 RunFit 访问您的运动传感器来计算步数和距离"
+        }
+      ]
+    ]
+  }
+}
