@@ -20,8 +20,16 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number): numb
   const R = 6371000;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function getMET(type: WorkoutType): number {
+  return type === 'running' ? 9.8 : type === 'walking' ? 3.8 : type === 'cycling' ? 7.5 : 4.0;
 }
 
 export default function RecordScreen() {
@@ -39,96 +47,140 @@ export default function RecordScreen() {
   const pedometerSubRef = useRef<{ remove: () => void } | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastLocationRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const workoutTypeRef = useRef<WorkoutType>('running');
+
+  // Keep workoutTypeRef in sync
+  useEffect(() => { workoutTypeRef.current = workoutType; }, [workoutType]);
 
   useEffect(() => {
     return () => {
-      stopRecording(false);
+      if (timerRef.current) clearInterval(timerRef.current);
+      locationSubRef.current?.remove();
+      pedometerSubRef.current?.remove();
     };
   }, []);
 
   async function startRecording() {
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('权限不足', '需要位置权限才能记录运动轨迹');
-      return;
-    }
-
-    startTimeRef.current = new Date().toISOString();
-    setIsRecording(true);
-    setElapsed(0);
-    setDistance(0);
-    setSteps(0);
-    setCalories(0);
-
-    timerRef.current = setInterval(() => {
-      setElapsed((prev) => prev + 1);
-      // Estimate calories every 10 seconds
-      setElapsed((prev) => {
-        if (prev % 10 === 0) {
-          const met = workoutType === 'running' ? 9.8 : workoutType === 'walking' ? 3.8 : workoutType === 'cycling' ? 7.5 : 4.0;
-          setCalories(Math.round(met * 70 * (prev / 3600)));
-        }
-        return prev;
-      });
-    }, 1000);
-
-    const { remove: locRemove } = await Location.watchPositionAsync(
-      { accuracy: Accuracy.High, timeInterval: 2000, distanceInterval: 5 },
-      (loc) => {
-        const { latitude, longitude } = loc.coords;
-        if (lastLocationRef.current) {
-          const d = haversine(lastLocationRef.current.latitude, lastLocationRef.current.longitude, latitude, longitude);
-          setDistance((prev) => prev + d);
-        }
-        lastLocationRef.current = { latitude, longitude };
+    try {
+      // Request location permission gracefully
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        // Not fatal — can still record without GPS
+        console.warn('Location permission denied, running without GPS');
       }
-    );
-    locationSubRef.current = { remove: locRemove };
 
-    const pedometerAvailable = await Pedometer.isAvailableAsync();
-    if (pedometerAvailable && startTimeRef.current) {
-      const { remove: pedRemove } = await Pedometer.watchStepCount((result) => {
-        setSteps(result.steps);
-      });
-      pedometerSubRef.current = { remove: pedRemove };
+      startTimeRef.current = new Date().toISOString();
+      setIsRecording(true);
+      setElapsed(0);
+      setDistance(0);
+      setSteps(0);
+      setCalories(0);
+
+      // Timer — update every second
+      timerRef.current = setInterval(() => {
+        setElapsed((prev) => {
+          const next = prev + 1;
+          // Update calories every 10 seconds
+          if (next % 10 === 0) {
+            const met = getMET(workoutTypeRef.current);
+            setCalories(Math.round(met * 70 * (next / 3600)));
+          }
+          return next;
+        });
+      }, 1000);
+
+      // GPS tracking (wrapped — won't crash if permission denied)
+      try {
+        const { remove: locRemove } = await Location.watchPositionAsync(
+          { accuracy: Accuracy.High, timeInterval: 2000, distanceInterval: 5 },
+          (loc) => {
+            const { latitude, longitude } = loc.coords;
+            if (lastLocationRef.current) {
+              const d = haversine(
+                lastLocationRef.current.latitude,
+                lastLocationRef.current.longitude,
+                latitude,
+                longitude
+              );
+              setDistance((prev) => prev + d);
+            }
+            lastLocationRef.current = { latitude, longitude };
+          }
+        );
+        locationSubRef.current = { remove: locRemove };
+      } catch (locErr) {
+        console.warn('Location tracking failed:', locErr);
+      }
+
+      // Pedometer (wrapped — will fail on HarmonyOS without GMS)
+      try {
+        const isAvailable = await Pedometer.isAvailableAsync();
+        if (isAvailable) {
+          const { remove: pedRemove } = await Pedometer.watchStepCount((result) => {
+            setSteps(result.steps);
+          });
+          pedometerSubRef.current = { remove: pedRemove };
+        }
+      } catch (pedErr) {
+        // Pedometer not available on this device — not fatal
+        console.warn('Pedometer unavailable on this device:', pedErr);
+      }
+    } catch (err) {
+      // Catch-all: any unexpected error during start should not white-screen
+      console.error('Failed to start recording:', err);
+      Alert.alert('启动失败', `无法开始记录：${String(err)}`);
+      setIsRecording(false);
+      startTimeRef.current = null;
     }
   }
 
   function stopRecording(save: boolean = true) {
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    locationSubRef.current?.remove(); locationSubRef.current = null;
-    pedometerSubRef.current?.remove(); pedometerSubRef.current = null;
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    locationSubRef.current?.remove();
+    locationSubRef.current = null;
+    pedometerSubRef.current?.remove();
+    pedometerSubRef.current = null;
     setIsRecording(false);
 
     if (!save || !startTimeRef.current) return;
 
     const endTime = new Date().toISOString();
     const date = startTimeRef.current.split('T')[0];
-    const met = workoutType === 'running' ? 9.8 : workoutType === 'walking' ? 3.8 : workoutType === 'cycling' ? 7.5 : 4.0;
-    const cals = Math.round(met * 70 * (elapsed / 3600));
+    const cals = Math.round(getMET(workoutTypeRef.current) * 70 * (elapsed / 3600));
 
     insertWorkout({
-      type: workoutType,
+      type: workoutTypeRef.current,
       duration: elapsed,
-      distance,
-      calories: cals || calories,
+      distance: distance || null,
+      calories: cals || calories || 0,
       date,
       startTime: startTimeRef.current,
       endTime,
       steps: steps || null,
       avgHeartRate: null,
       notes: notes || null,
-    }).then(() => {
-      Alert.alert('保存成功', `记录已保存：${formatElapsed(elapsed)} / ${formatDistance(distance)}`, [
-        { text: '查看历史', onPress: () => router.push('/history') },
-        { text: '确定', onPress: () => setNotes('') },
-      ]);
-    });
+    })
+      .then(() => {
+        Alert.alert('保存成功', `记录已保存：${formatElapsed(elapsed)} / ${formatDistance(distance)}`, [
+          { text: '查看历史', onPress: () => router.push('/history') },
+          { text: '确定', onPress: () => setNotes('') },
+        ]);
+      })
+      .catch((err) => {
+        console.error('Failed to save workout:', err);
+        Alert.alert('保存失败', String(err));
+      });
+
     startTimeRef.current = null;
   }
 
   function formatElapsed(s: number): string {
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const h = Math.floor(s / 3600),
+      m = Math.floor((s % 3600) / 60),
+      sec = s % 60;
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
   }
   function formatDistance(m: number): string {
@@ -136,14 +188,20 @@ export default function RecordScreen() {
   }
 
   return (
-    <ScrollView style={styles.container}>
+    <ScrollView style={styles.container} keyboardShouldPersistTaps="handled">
       {!isRecording && (
         <View style={styles.typeSection}>
           <Text style={styles.label}>选择运动类型</Text>
           <View style={styles.typeGrid}>
             {(Object.keys(typeLabels) as WorkoutType[]).map((t) => (
-              <TouchableOpacity key={t} style={[styles.typeButton, workoutType === t && styles.typeButtonActive]} onPress={() => setWorkoutType(t)}>
-                <Text style={[styles.typeButtonText, workoutType === t && styles.typeButtonTextActive]}>{typeLabels[t]}</Text>
+              <TouchableOpacity
+                key={t}
+                style={[styles.typeButton, workoutType === t && styles.typeButtonActive]}
+                onPress={() => setWorkoutType(t)}
+              >
+                <Text style={[styles.typeButtonText, workoutType === t && styles.typeButtonTextActive]}>
+                  {typeLabels[t]}
+                </Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -161,11 +219,11 @@ export default function RecordScreen() {
             <Text style={styles.statLabel}>距离</Text>
           </View>
           <View style={styles.statBox}>
-            <Text style={styles.statValue}>{steps}</Text>
+            <Text style={styles.statValue}>{steps || '-'}</Text>
             <Text style={styles.statLabel}>步数</Text>
           </View>
           <View style={styles.statBox}>
-            <Text style={styles.statValue}>{calories}</Text>
+            <Text style={styles.statValue}>{calories || '-'}</Text>
             <Text style={styles.statLabel}>千卡</Text>
           </View>
         </View>
@@ -218,8 +276,22 @@ const styles = StyleSheet.create({
   statBox: { alignItems: 'center' },
   statValue: { fontSize: 22, fontWeight: 'bold', color: '#333' },
   statLabel: { fontSize: 12, color: '#999', marginTop: 2 },
-  notesInput: { backgroundColor: '#fff', borderRadius: 12, padding: 14, fontSize: 15, marginBottom: 16, minHeight: 60, textAlignVertical: 'top' },
-  startBtn: { backgroundColor: '#4CAF50', paddingVertical: 16, borderRadius: 30, alignItems: 'center', marginBottom: 20 },
+  notesInput: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 14,
+    fontSize: 15,
+    marginBottom: 16,
+    minHeight: 60,
+    textAlignVertical: 'top',
+  },
+  startBtn: {
+    backgroundColor: '#4CAF50',
+    paddingVertical: 16,
+    borderRadius: 30,
+    alignItems: 'center',
+    marginBottom: 20,
+  },
   startBtnText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
   recordingControls: { alignItems: 'center', marginTop: 10 },
   recordingIndicator: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
